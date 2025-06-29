@@ -137,14 +137,6 @@ This project implements an advanced Information Retrieval (IR) system designed t
 
 ---
 
-## Authors
-- **Nikhil Yadav** - Chatbot features, admin dashboard, book scraping, and embedding management.
-- **Jitendra Kumar** - Data scraping, sentiment analysis, and generative AI integration.
-- **Nikhil Raj Soni** - Authentication, user-specific alignment, and data cleaning.
-- **Rashmi Kumari** - Book data cleaning and backend-frontend integration.
-
----
-
 ## License
 This project is licensed under the MIT License.
 
