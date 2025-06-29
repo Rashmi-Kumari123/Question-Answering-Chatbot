@@ -1,0 +1,6 @@
+chapter_name,source,text
+Introduction to ML,JavaTpoint,Machine Learning is a subset of Artificial Intelligence that provides systems the ability to automatically learn and improve from experience.
+Supervised Learning,GeeksForGeeks,In supervised learning, the machine is trained using labeled data. It learns a mapping from inputs to outputs based on this data.
+Unsupervised Learning,JavaTpoint,Unsupervised learning involves training without labeled data, identifying patterns and groupings within the input data.
+Reinforcement Learning,ML_docs_book,Reinforcement Learning trains agents to take actions to maximize cumulative rewards in an environment based on feedback.
+Applications of ML,GeeksForGeeks,Applications of Machine Learning include recommendation systems, image recognition, speech recognition, and autonomous vehicles.

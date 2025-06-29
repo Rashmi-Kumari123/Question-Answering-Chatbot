@@ -1,0 +1,16 @@
+Flask
+Flask-Cors
+pandas
+numpy
+scikit-learn
+matplotlib
+nltk
+psycopg2-binary
+pgvector
+sentence-transformers
+Werkzeug
+groq
+gunicorn
+huggingface-hub
+python-dotenv
+
