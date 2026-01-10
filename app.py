@@ -35,6 +35,19 @@ class InformationRetrievalSystem:
         
         # Database connection
         self.conn = psycopg2.connect(**db_params)
+        
+        # Create vector extension before registering it
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            self.conn.commit()
+        except Exception as e:
+            print(f"Warning: Could not create vector extension: {e}")
+            print("Please install pgvector extension: sudo apt install postgresql-18-pgvector")
+        finally:
+            cursor.close()
+        
+        # Register vector type after extension is created
         register_vector(self.conn)
         
         # Initialize database
@@ -152,6 +165,14 @@ class InformationRetrievalSystem:
         self.conn.commit()
         
         try:
+            # Handle relative paths - convert to absolute if needed
+            if not os.path.isabs(csv_path):
+                # Get the directory where app.py is located
+                app_dir = os.path.dirname(os.path.abspath(__file__))
+                csv_path = os.path.join(app_dir, csv_path)
+            
+            print(f"Resolved CSV path: {csv_path}")
+            
             with open(csv_path, 'r', encoding='utf-8') as csvfile:
                 csv_reader = csv.reader(csvfile)
                 headers = next(csv_reader)  # Capture headers for debugging
@@ -172,9 +193,10 @@ class InformationRetrievalSystem:
                             print(f"Warning: Skipping row {row_count} - insufficient columns")
                             continue
                         
-                        chapter_name = row[1]  # First column is chapter name
-                        source = row[2]  # Second column is source
-                        text = row[3]  # Third column is text                        
+                        # CSV format: chapter_name, source, text (after header)
+                        chapter_name = row[0]  # First column is chapter name
+                        source = row[1]  # Second column is source
+                        text = row[2]  # Third column is text                        
                         # Truncate very long texts if necessary
                         
                         print(f"Embedding text: {text[:50]}...")  # Print first 50 chars
@@ -214,14 +236,20 @@ class InformationRetrievalSystem:
     def rewrite_question(self, query):
         key1 = os.getenv('key1')
         
-        client = Groq(
-            api_key=key1
-        )
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"""
+        # If API key is not set, return original query without rewriting
+        if not key1:
+            print("Warning: Groq API key (key1) not found. Using original query without rewriting.")
+            return query
+        
+        try:
+            client = Groq(
+                api_key=key1
+            )
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"""
     You are an expert in language refinement. Rephrase the following question to improve its clarity, fluency, and readability while preserving its original intent:
 
     Original question: "{query}"
@@ -230,12 +258,15 @@ class InformationRetrievalSystem:
     - Is grammatically correct and concise.
     - Retains the original meaning.
     - Sounds natural and professional.
-                    """,
-                }
-            ],
-            model="llama3-8b-8192",
-        )
-        return chat_completion.choices[0].message.content
+                        """,
+                    }
+                ],
+                model="llama3-8b-8192",
+            )
+            return chat_completion.choices[0].message.content
+        except Exception as e:
+            print(f"Error rewriting question with Groq API: {e}. Using original query.")
+            return query
 
 
     def search_documents(self, query, user_id, top_k=1):  # Default top_k to 1 for single best match
@@ -706,10 +737,22 @@ def use_api(text, trial, question):
 
     # Rotate API keys
     key = key1 if trial % 3 == 1 else (key2 if trial % 3 == 2 else key3)
-    print("Using API key (masked):", key[:8], "***")
     
-    client = Groq(api_key=key)
-    print("Using API key:", key, flush=True)
+    # Check if API key is available
+    if not key:
+        error_msg = "Groq API key not configured. Please add key1, key2, or key3 to your .env file."
+        print(f"Error: {error_msg}")
+        # Return a fallback response
+        return f"I apologize, but I'm currently unable to generate a detailed response. However, based on the retrieved context: {text[:200]}..."
+    
+    print("Using API key (masked):", key[:8] if len(key) > 8 else "***", "***")
+    
+    try:
+        client = Groq(api_key=key)
+        print("Using API key:", key, flush=True)
+    except Exception as e:
+        print(f"Error initializing Groq client: {e}")
+        return f"I apologize, but I'm currently unable to generate a detailed response. However, based on the retrieved context: {text[:200]}..."
 
     ...
 
@@ -766,13 +809,21 @@ def use_api(text, trial, question):
         ]
     
     # Make the API call
-    chat_completion = client.chat.completions.create(
-        messages=messages,
-        model="llama3-8b-8192",
-        max_tokens=150  # Limit response length
-    )
-    
-    return chat_completion.choices[0].message.content
+    try:
+        chat_completion = client.chat.completions.create(
+            messages=messages,
+            model="llama3-8b-8192",
+            max_tokens=150  # Limit response length
+        )
+        
+        return chat_completion.choices[0].message.content
+    except Exception as e:
+        print(f"Error calling Groq API: {e}")
+        # Return a fallback response based on the retrieved text
+        if text:
+            return f"Based on the retrieved information: {text[:300]}..."
+        else:
+            return "I apologize, but I encountered an error while processing your request. Please try again later."
 
 @app.route('/save_feedback', methods=['POST'])
 def save_feedback():
