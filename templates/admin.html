@@ -328,18 +328,44 @@ document.querySelectorAll('.menu-btn').forEach(button => {
                     headers: {
                         'Content-Type': 'application/x-www-form-urlencoded',
                     },
+                    credentials: 'include', // Include cookies for session
                     body: `csv_path=${encodeURIComponent(csvPath)}`
                 });
                 
-                const data = await response.json();
-                resultDiv.innerHTML = `
-                    <div class="alert alert-success">
-                        <i class="fas fa-check-circle"></i>
-                        ${data.message}
-                    </div>`;
+                // Check if response is JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    // If redirected to login, the response will be HTML
+                    if (response.redirected || response.status === 302 || response.status === 401) {
+                        resultDiv.innerHTML = `
+                            <div class="alert alert-error">
+                                <i class="fas fa-exclamation-circle"></i>
+                                Session expired. Please <a href="/login">login again</a>.
+                            </div>`;
+                        return;
+                    }
+                    const text = await response.text();
+                    throw new Error(`Server returned non-JSON response: ${text.substring(0, 100)}`);
+                }
                 
-                // Update stats
-                updateStats();
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    resultDiv.innerHTML = `
+                        <div class="alert alert-success">
+                            <i class="fas fa-check-circle"></i>
+                            ${data.message}
+                        </div>`;
+                    
+                    // Update stats
+                    updateStats();
+                } else {
+                    resultDiv.innerHTML = `
+                        <div class="alert alert-error">
+                            <i class="fas fa-exclamation-circle"></i>
+                            ${data.message || 'Unknown error occurred'}
+                        </div>`;
+                }
             } catch (error) {
                 resultDiv.innerHTML = `
                     <div class="alert alert-error">
