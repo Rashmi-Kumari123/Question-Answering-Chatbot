@@ -67,7 +67,7 @@ This project implements an advanced Information Retrieval (IR) system designed t
 ### Installation
 1. Clone the repository:
    ```bash
-   git clone https://github.com/nikhilyadav09/ML_chatbot.git
+   git clone https://github.com/Rashmi-Kumari123/Question-Answering-Chatbot.git
    cd ML_chatbot
    ```
 
