@@ -166,12 +166,34 @@ class InformationRetrievalSystem:
         
         try:
             # Handle relative paths - convert to absolute if needed
+            original_path = csv_path
             if not os.path.isabs(csv_path):
                 # Get the directory where app.py is located
                 app_dir = os.path.dirname(os.path.abspath(__file__))
-                csv_path = os.path.join(app_dir, csv_path)
+                # Normalize the path (handle both script/file.csv and ./script/file.csv)
+                csv_path = os.path.normpath(os.path.join(app_dir, csv_path))
             
+            print(f"Original CSV path: {original_path}")
             print(f"Resolved CSV path: {csv_path}")
+            print(f"File exists: {os.path.exists(csv_path)}")
+            
+            # Check if file exists before trying to open
+            if not os.path.exists(csv_path):
+                error_msg = f"File not found: {csv_path}"
+                print(error_msg)
+                # Try alternative paths
+                alternative_paths = [
+                    os.path.join(app_dir, 'script', 'converted_ml_topics.csv'),
+                    os.path.join(app_dir, original_path.lstrip('./')),
+                    original_path  # Try original path as-is
+                ]
+                for alt_path in alternative_paths:
+                    if os.path.exists(alt_path):
+                        print(f"Found file at alternative path: {alt_path}")
+                        csv_path = alt_path
+                        break
+                else:
+                    return f"Failed to embed documents from {original_path} - File not found. Checked paths: {csv_path}"
             
             with open(csv_path, 'r', encoding='utf-8') as csvfile:
                 csv_reader = csv.reader(csvfile)
@@ -234,6 +256,10 @@ class InformationRetrievalSystem:
                 cursor.close()
 
     def rewrite_question(self, query):
+        """
+        Advanced query rewriting using AI to improve search quality.
+        Expands and refines the query for better semantic matching.
+        """
         key1 = os.getenv('key1')
         
         # If API key is not set, return original query without rewriting
@@ -250,40 +276,104 @@ class InformationRetrievalSystem:
                     {
                         "role": "user",
                         "content": f"""
-    You are an expert in language refinement. Rephrase the following question to improve its clarity, fluency, and readability while preserving its original intent:
+    You are an expert in information retrieval and query optimization. Your task is to rewrite and expand the following question to improve search results while preserving the original intent.
 
     Original question: "{query}"
 
-    Make sure the rewritten version:
-    - Is grammatically correct and concise.
-    - Retains the original meaning.
-    - Sounds natural and professional.
+    Instructions:
+    1. Rephrase the question to be grammatically correct and clear
+    2. Add relevant synonyms or related terms that might help find better matches
+    3. Keep the core meaning and intent exactly the same
+    4. Make it sound natural and professional
+    5. If the query is about machine learning concepts, include relevant ML terminology
+    
+    Return only the rewritten query, nothing else.
                         """,
                     }
                 ],
                 model="llama3-8b-8192",
+                temperature=0.3,  # Lower temperature for more consistent rewrites
             )
-            return chat_completion.choices[0].message.content
+            rewritten = chat_completion.choices[0].message.content.strip()
+            # Remove quotes if AI added them
+            if rewritten.startswith('"') and rewritten.endswith('"'):
+                rewritten = rewritten[1:-1]
+            return rewritten
         except Exception as e:
             print(f"Error rewriting question with Groq API: {e}. Using original query.")
             return query
 
 
-    def search_documents(self, query, user_id, top_k=1):  # Default top_k to 1 for single best match
-        rewritten_query  = self.rewrite_question(query)
+    def rerank_documents(self, query, candidates):
+        """
+        Advanced reranking using multiple signals:
+        1. Semantic similarity (already computed)
+        2. Keyword overlap score
+        3. Query-document relevance
+        """
+        if not candidates:
+            return candidates
+        
+        query_lower = query.lower()
+        query_words = set(query_lower.split())
+        
+        reranked = []
+        for candidate in candidates:
+            text = candidate['text'].lower()
+            chapter = candidate.get('chapter_name', '').lower()
+            
+            # Calculate keyword overlap score
+            text_words = set(text.split())
+            chapter_words = set(chapter.split()) if chapter else set()
+            
+            # Count overlapping words
+            text_overlap = len(query_words.intersection(text_words))
+            chapter_overlap = len(query_words.intersection(chapter_words))
+            
+            # Weighted keyword score (chapter name matches are more important)
+            keyword_score = (text_overlap * 0.3) + (chapter_overlap * 0.7)
+            normalized_keyword_score = keyword_score / max(len(query_words), 1)
+            
+            # Combined relevance score: 70% semantic similarity + 30% keyword match
+            semantic_score = candidate['similarity']
+            combined_score = (semantic_score * 0.7) + (normalized_keyword_score * 0.3)
+            
+            candidate['rerank_score'] = combined_score
+            candidate['keyword_score'] = normalized_keyword_score
+            reranked.append(candidate)
+        
+        # Sort by combined rerank score
+        reranked.sort(key=lambda x: x['rerank_score'], reverse=True)
+        return reranked
+    
+    def search_documents(self, query, user_id, top_k=1, rerank=True):  # Default top_k to 1 for single best match
+        """
+        Advanced document search with query rewriting and reranking.
+        
+        Args:
+            query: User's search query
+            user_id: User ID for tracking
+            top_k: Number of results to return
+            rerank: Whether to apply advanced reranking (default: True)
+        """
+        # Step 1: Query Rewriting using AI
+        rewritten_query = self.rewrite_question(query)
         query_embedding = self.model.encode(rewritten_query).tolist()
-        print(rewritten_query)
-        print(query_embedding)
+        print(f"Original query: {query}")
+        print(f"Rewritten query: {rewritten_query}")
         
         cursor = self.conn.cursor()
         try:
-            # Execute SQL query to find top_k matches ordered by similarity
+            # Step 2: Retrieve more candidates for reranking (if rerank is enabled)
+            retrieve_count = top_k * 5 if rerank else top_k  # Get 5x candidates for reranking
+            
+            # Execute SQL query to find candidates ordered by similarity
             cursor.execute("""
                 SELECT text, source, chapter_name, 1 - (embedding <=> %s::vector) as similarity 
                 FROM document_embeddings 
                 ORDER BY similarity DESC 
                 LIMIT %s
-            """, (query_embedding, top_k))
+            """, (query_embedding, retrieve_count))
             
             results = cursor.fetchall()
             
@@ -293,7 +383,7 @@ class InformationRetrievalSystem:
                 response_data = []  # Empty response if no matches
             else:
                 # Format results into structured response
-                response_data = [
+                candidates = [
                     {
                         "text": text, 
                         "source": source, 
@@ -301,15 +391,32 @@ class InformationRetrievalSystem:
                         "similarity": float(similarity)
                     } 
                     for text, source, chapter_name, similarity in results
-
                 ]
-                print("response: recieved........")
+                
+                # Step 3: Advanced Reranking (if enabled)
+                if rerank and len(candidates) > 1:
+                    try:
+                        print(f"Reranking {len(candidates)} candidates...")
+                        reranked_candidates = self.rerank_documents(query, candidates)
+                        # Take top_k after reranking
+                        response_data = reranked_candidates[:top_k]
+                        print(f"Selected top {top_k} after reranking")
+                    except Exception as rerank_error:
+                        print(f"Error in reranking, using original results: {rerank_error}")
+                        import traceback
+                        traceback.print_exc()
+                        response_data = candidates[:top_k]
+                else:
+                    response_data = candidates[:top_k]
+                
+                print("response: received........")
                 
                 # Prepare chat history text for the best match
                 top_result = response_data[0]  # The single best result
+                rerank_info = f", Rerank Score: {top_result.get('rerank_score', top_result['similarity']):.2f}" if rerank else ""
                 response_text = (
                     f"{top_result['text']} "
-                    f"(Similarity: {top_result['similarity']:.2f}, "
+                    f"(Similarity: {top_result['similarity']:.2f}{rerank_info}, "
                     f"Chapter: {top_result['chapter_name']}, "
                     f"Source: {top_result['source']})"
                 )
@@ -329,6 +436,7 @@ class InformationRetrievalSystem:
                     )
                 """)
                 # Save chat history with relevant context
+                final_similarity = top_result.get('rerank_score', top_result['similarity'])
                 cursor.execute("""
                     INSERT INTO chat_history (
                         user_id, query, response, similarity, source, chapter_name, timestamp
@@ -337,7 +445,7 @@ class InformationRetrievalSystem:
                     user_id,
                     query,
                     (top_result['text']),  # Formatted response text
-                    (top_result["similarity"]),  # Similarity score
+                    float(final_similarity),  # Use rerank score if available, else similarity
                     top_result["source"],  # Source link
                     top_result["chapter_name"]  # Chapter name
                 ))
@@ -442,7 +550,11 @@ def get_database_connection(DB_PARAMS):
 def fetch_embeddings(db_params):
     """Fetch embeddings from the database."""
     try:
-        with get_database_connection(db_params) as conn:
+        conn = get_database_connection(db_params)
+        # Register vector type for this connection (required for pgvector)
+        register_vector(conn)
+        
+        with conn:
             with conn.cursor() as cur:
                 # Fetch all embeddings
                 cur.execute("""
@@ -457,10 +569,33 @@ def fetch_embeddings(db_params):
                     print("No embeddings found in database")
                     return None
                 
-                embeddings = [np.frombuffer(row[0], dtype=np.float32) for row in rows]
-                return np.array(embeddings)
+                print(f"Found {len(rows)} embeddings in database")
+                
+                # Convert pgvector to numpy array
+                embeddings = []
+                for row in rows:
+                    embedding_vector = row[0]
+                    # pgvector returns as list or array-like
+                    if isinstance(embedding_vector, (list, tuple)):
+                        embeddings.append(np.array(embedding_vector, dtype=np.float32))
+                    elif hasattr(embedding_vector, '__array__'):
+                        embeddings.append(np.array(embedding_vector, dtype=np.float32))
+                    else:
+                        # Try frombuffer as fallback
+                        try:
+                            embeddings.append(np.frombuffer(embedding_vector, dtype=np.float32))
+                        except Exception as e:
+                            print(f"Error converting embedding: {e}")
+                            # Try converting to list first
+                            embeddings.append(np.array(list(embedding_vector), dtype=np.float32))
+                
+                result = np.array(embeddings)
+                print(f"Successfully converted {len(result)} embeddings to numpy array")
+                return result
     except Exception as e:
         print(f"Error fetching embeddings: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 # Process embeddings with PCA and clustering
@@ -992,30 +1127,47 @@ def search_documents():
     if 'user_id' not in session:
         return redirect(url_for('login'))
     
-    query = request.json.get('query', '')
-    results = ir_system.search_documents(query, session['user_id'])
-    
-    # Check if results are empty
-    if not results:
-        return jsonify([])
-    
-    unique_results = list({result['text']: result for result in results}.values())
-    
-    # Initialize api_response to handle potential API call failures
-    api_response = "No API response available"
-    
     try:
-        text = unique_results[0]["text"]
-        trial = 0
-        api_response = use_api(text, trial, query)
-    except Exception as e:
-        print(f"Error in API response: {e}")
-        # If API call fails, keep the default "No API response available"
-    
-    # Add API response to the first result
-    unique_results[0]["api_response"] = str(api_response)
+        query = request.json.get('query', '')
+        if not query:
+            return jsonify({'error': 'Query is required'}), 400
+        
+        # Get optional parameters for advanced search
+        top_k = request.json.get('top_k', 1)  # Default to 1, but allow more
+        rerank = request.json.get('rerank', True)  # Enable reranking by default
+        
+        # Use advanced search with reranking
+        results = ir_system.search_documents(query, session['user_id'], top_k=top_k, rerank=rerank)
+        
+        # Check if results are empty
+        if not results:
+            return jsonify([])
+        
+        unique_results = list({result['text']: result for result in results}.values())
+        
+        # Initialize api_response to handle potential API call failures
+        api_response = "No API response available"
+        
+        try:
+            text = unique_results[0]["text"]
+            trial = 0
+            api_response = use_api(text, trial, query)
+        except Exception as e:
+            print(f"Error in API response: {e}")
+            import traceback
+            traceback.print_exc()
+            # If API call fails, keep the default "No API response available"
+        
+        # Add API response to the first result
+        unique_results[0]["api_response"] = str(api_response)
 
-    return jsonify(unique_results)
+        return jsonify(unique_results)
+    
+    except Exception as e:
+        print(f"Error in search_documents endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/logout')
 def logout():
